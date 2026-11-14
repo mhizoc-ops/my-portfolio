@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -13,7 +14,7 @@ export const seedLeads = [
   { name: 'James Foster', email: 'j.foster@example.com', phone: '(415) 555-0155', service: 'Property management', message: 'I’m comparing management options for a small apartment building in Berkeley.', status: 'Closed', minutes: 900 },
 ];
 
-export function createDatabase(filename = path.resolve('data/leads.db')) {
+export function createDatabase(filename = process.env.DATABASE_PATH || path.resolve('data/leads.db')) {
   if (filename !== ':memory:') fs.mkdirSync(path.dirname(filename), { recursive: true });
   const db = new DatabaseSync(filename);
   db.exec('PRAGMA journal_mode = WAL');
@@ -21,6 +22,7 @@ export function createDatabase(filename = path.resolve('data/leads.db')) {
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL,
     phone TEXT NOT NULL DEFAULT '', service TEXT NOT NULL, message TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'New', draft TEXT NOT NULL, is_sample INTEGER NOT NULL DEFAULT 0,
+    workspace_id TEXT,
     created_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS activities (
@@ -28,11 +30,18 @@ export function createDatabase(filename = path.resolve('data/leads.db')) {
     detail TEXT NOT NULL, created_at TEXT NOT NULL,
     FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE CASCADE
   );`);
+  const leadColumns = db.prepare('PRAGMA table_info(leads)').all();
+  if (!leadColumns.some((column) => column.name === 'workspace_id')) {
+    db.exec('ALTER TABLE leads ADD COLUMN workspace_id TEXT');
+    // Existing non-sample records have no browser owner. Keep them private after migration.
+    db.prepare('UPDATE leads SET workspace_id = ? WHERE is_sample = 0 AND workspace_id IS NULL').run(randomUUID());
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_leads_workspace ON leads(workspace_id, created_at)');
   return db;
 }
 
 export function seedDatabase(db) {
-  if (db.prepare('SELECT COUNT(*) AS count FROM leads').get().count > 0) return;
+  if (db.prepare('SELECT COUNT(*) AS count FROM leads WHERE is_sample = 1').get().count > 0) return;
   const insert = db.prepare(`INSERT INTO leads (name,email,phone,service,message,status,draft,is_sample,created_at)
     VALUES (@name,@email,@phone,@service,@message,@status,@draft,1,@created_at)`);
   const activity = db.prepare('INSERT INTO activities (lead_id,type,detail,created_at) VALUES (?,?,?,?)');
@@ -51,11 +60,11 @@ export function seedDatabase(db) {
   });
 }
 
-export function resetDatabase(db) {
+export function resetDatabase(db, workspaceId) {
   inTransaction(db, () => {
-    db.prepare('DELETE FROM activities').run();
-    db.prepare('DELETE FROM leads').run();
-    db.prepare("DELETE FROM sqlite_sequence WHERE name IN ('leads', 'activities')").run();
+    db.prepare(`DELETE FROM activities WHERE lead_id IN
+      (SELECT id FROM leads WHERE is_sample = 1 OR workspace_id = ?)`).run(workspaceId);
+    db.prepare('DELETE FROM leads WHERE is_sample = 1 OR workspace_id = ?').run(workspaceId);
   });
   seedDatabase(db);
 }
@@ -67,6 +76,7 @@ export function inTransaction(db, callback) {
 }
 
 export function withActivities(db, lead) {
-  return { ...lead, isSample: Boolean(lead.is_sample), createdAt: lead.created_at,
+  const { workspace_id: _workspaceId, is_sample, created_at, ...publicFields } = lead;
+  return { ...publicFields, isSample: Boolean(is_sample), createdAt: created_at,
     activity: db.prepare('SELECT type, detail, created_at AS createdAt FROM activities WHERE lead_id = ? ORDER BY created_at DESC, id DESC').all(lead.id) };
 }

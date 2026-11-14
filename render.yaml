@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: leadflow-ai-portfolio
+    runtime: node
+    plan: 0.5c-512mb
+    region: oregon
+    buildCommand: npm ci && npm test && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: leadflow-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 24.22.1
+      - key: DATABASE_PATH
+        value: /var/data/leads.db
+      - key: TRUST_PROXY
+        value: "true"
